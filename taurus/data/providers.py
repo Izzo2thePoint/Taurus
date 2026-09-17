@@ -20,15 +20,9 @@ OHLCV_COLUMNS = ["open", "high", "low", "close", "volume"]
 
 def _parquet_available() -> bool:
     """Whether pandas can actually write parquet in this environment."""
-    try:
-        import pyarrow  # noqa: F401
-        return True
-    except ImportError:
-        try:
-            import fastparquet  # noqa: F401
-            return True
-        except ImportError:
-            return False
+    from importlib.util import find_spec
+
+    return any(find_spec(pkg) is not None for pkg in ("pyarrow", "fastparquet"))
 
 
 class MarketDataProvider(ABC):
