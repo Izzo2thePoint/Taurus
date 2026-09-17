@@ -28,8 +28,9 @@ class DataConfig:
     cache_dir: str = "data_cache"
     # Benchmark used for relative-strength features and for reporting alpha.
     benchmark: str = "SPY"
-    # "yfinance" for free Yahoo bars, or "csv" to read <csv_dir>/<SYMBOL>.csv.
-    # Use csv behind a restricted network, or to feed a paid vendor's export.
+    # "yfinance" (free Yahoo), "stooq" (free, no key, a useful second
+    # opinion), or "csv" to read <csv_dir>/<SYMBOL>.csv. Use csv behind a
+    # restricted network, or to feed a paid vendor's export.
     provider: str = "yfinance"
     csv_dir: str = "data_csv"
 

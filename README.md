@@ -45,7 +45,7 @@ pip install -r requirements.txt
 ```bash
 python scripts/make_demo_data.py                       # synthetic market
 python -m taurus.cli research --config config.offline.yaml
-python -m taurus.cli backtest --config config.offline.yaml
+python -m taurus.cli backtest --config config.offline.yaml --walk-forward
 ```
 
 ## Against real data
@@ -53,14 +53,22 @@ python -m taurus.cli backtest --config config.offline.yaml
 ```bash
 python -m taurus.cli validate  --config config.yaml    # audit the risk settings
 python -m taurus.cli research  --config config.yaml    # walk-forward + train
-python -m taurus.cli backtest  --config config.yaml    # replay history
+python -m taurus.cli backtest  --config config.yaml --walk-forward   # replay, out-of-sample
 python -m taurus.cli signals   --config config.yaml    # today's picks, no trades
 python -m taurus.cli trade     --config config.yaml    # run the agent
 ```
 
-`data.provider` selects the feed: `yfinance` (free, default) or `csv`, which
-reads `<csv_dir>/<SYMBOL>.csv` — use that for a paid vendor's export or behind
-a restricted network.
+`data.provider` selects the feed:
+
+- `yfinance` — free Yahoo bars (default).
+- `stooq` — free, no API key. Worth running as a second opinion: when two
+  vendors disagree about a bar it is usually a split or a bad tick, and
+  finding that out from a backtest is expensive. Split-adjusted but not
+  dividend-adjusted, so total returns read slightly low on payers.
+- `csv` — reads `<csv_dir>/<SYMBOL>.csv`. Use for a paid vendor's export, or
+  behind a restricted network.
+
+Bars are cached to disk (parquet when `pyarrow` is installed, CSV otherwise).
 
 ---
 
@@ -97,10 +105,17 @@ are enforced on every cycle regardless of configuration:
 
 Most backtests are wrong in the same few ways. This one is built against them:
 
-- **No lookahead.** Signals are computed from the close of bar `t`; orders fill
-  at the **open of bar `t+1`**. `tests/test_backtest.py` asserts that a
-  strategy is never handed a bar dated after the day it is deciding on — if
-  that test fails, every number the system produces is fiction.
+- **No bar-level lookahead.** Signals are computed from the close of bar `t`;
+  orders fill at the **open of bar `t+1`**. `tests/test_backtest.py` asserts
+  that a strategy is never handed a bar dated after the day it is deciding on
+  — if that test fails, every number the system produces is fiction.
+- **No model-level lookahead**, with `--walk-forward`. This one is subtler and
+  catches people who got the bar timing right. A model trained on all history
+  and then backtested over that same history has *seen the answers*, even
+  though every fill is correctly dated. `--walk-forward` instead draws each
+  probability from the fold whose training window ended before that bar, so a
+  signal is only ever produced by a model that had not seen it. Without the
+  flag the tool prints a warning saying the result is contaminated.
 - **Causal indicators.** Appending future bars provably does not change any
   historical indicator value; this is tested directly.
 - **Purged, embargoed walk-forward.** Triple-barrier labels resolve up to
@@ -187,13 +202,13 @@ taurus/
   data/providers.py      yfinance / CSV providers, disk cache
   features/              causal indicators and the feature matrix builder
   research/              labeling, model, purged walk-forward, dataset panel
-  strategy/              base interface, ML alpha, momentum breakout, ensemble
+  strategy/              base, ML alpha, walk-forward alpha, momentum, ensemble
   risk/                  sizing, portfolio limits, kill switch, allocator
   execution/             broker interface, paper broker, gated Alpaca adapter
   backtest/              event-driven engine, performance metrics
   agent/                 the trading loop and the decision journal
   cli.py                 research | backtest | signals | trade | validate
-tests/                   86 tests
+tests/                   109 tests
 ```
 
 The backtester and the live agent share one allocator (`risk/allocator.py`)
@@ -204,7 +219,7 @@ live behavior is worse than none, because it is trusted.
 ## Tests
 
 ```bash
-python -m pytest tests/ -q      # 86 passed
+python -m pytest tests/ -q      # 109 passed
 ```
 
 ---

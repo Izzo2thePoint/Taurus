@@ -26,6 +26,7 @@ from .research.walkforward import run_walk_forward, train_production_model
 from .strategy.ensemble import EnsembleStrategy
 from .strategy.ml_alpha import MLAlphaStrategy
 from .strategy.momentum import MomentumBreakoutStrategy
+from .strategy.walkforward_alpha import WalkForwardAlphaStrategy
 
 log = logging.getLogger("taurus")
 
@@ -149,11 +150,32 @@ def cmd_backtest(args) -> int:
     config = Config.load(args.config)
     bars, panel = _load_data(config, args.end)
 
-    model = None if args.rules_only else _load_gated_model(config, args.force_model)
-    strategy = _build_strategy(config, model)
+    if args.walk_forward:
+        # The honest way to evaluate a learned signal: every probability comes
+        # from a model that had not seen the bar it is predicting.
+        print("\nRunning walk-forward to generate out-of-sample signals...")
+        wf = run_walk_forward(panel, config.model)
+        print(f"  {len(wf.folds)} folds, mean OOS accuracy {wf.mean_accuracy:.4f}, "
+              f"mean AUC {wf.mean_auc:.4f}")
+        alpha = WalkForwardAlphaStrategy(wf.predictions, config.risk)
+        rules = MomentumBreakoutStrategy(config.risk)
+        strategy = EnsembleStrategy([alpha, rules], weights=[0.65, 0.35])
+        # The first fold's training window has no signals, so start the
+        # backtest where predictions actually begin.
+        first = wf.predictions.index.get_level_values("date").min()
+        args.start = max(args.start, str(first.date())) if args.start else str(first.date())
+    else:
+        model = None if args.rules_only else _load_gated_model(config, args.force_model)
+        strategy = _build_strategy(config, model)
+        if model is not None:
+            print("\n  NOTE: this model was trained on the history you are about to")
+            print("  backtest, so its signals are contaminated. Use --walk-forward")
+            print("  for an out-of-sample evaluation.")
+
     result = BacktestEngine(config, strategy).run(panel, bars, args.start, args.end)
 
-    print(f"\nBacktest — {type(strategy).__name__}")
+    print(f"\nBacktest — {type(strategy).__name__}"
+          f"{' (out-of-sample)' if args.walk_forward else ''}")
     print(f"  Aggression {config.risk.aggression}  "
           f"max leverage {config.risk.max_gross_leverage}x  "
           f"vol target {config.risk.target_annual_vol:.0%}\n")
@@ -318,6 +340,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out", default=None, help="write the equity curve to CSV")
     p.add_argument("--force-model", action="store_true",
                    help="use the saved model even if it failed its gate (research only)")
+    p.add_argument("--walk-forward", action="store_true",
+                   help="evaluate out-of-sample: signals come from walk-forward "
+                        "models that never saw the bar they predict")
     p.set_defaults(func=cmd_backtest)
 
     p = sub.add_parser("signals", parents=[common], help="print today's signals, trade nothing")

@@ -18,6 +18,19 @@ log = logging.getLogger(__name__)
 OHLCV_COLUMNS = ["open", "high", "low", "close", "volume"]
 
 
+def _parquet_available() -> bool:
+    """Whether pandas can actually write parquet in this environment."""
+    try:
+        import pyarrow  # noqa: F401
+        return True
+    except ImportError:
+        try:
+            import fastparquet  # noqa: F401
+            return True
+        except ImportError:
+            return False
+
+
 class MarketDataProvider(ABC):
     """Source of historical bars for a single symbol."""
 
@@ -102,6 +115,55 @@ class CSVProvider(MarketDataProvider):
         return df.loc[str(start):str(end)] if end else df.loc[str(start):]
 
 
+class StooqProvider(MarketDataProvider):
+    """Free daily bars from stooq.com. No API key, no rate limit worth
+    worrying about.
+
+    Worth having as a second opinion: when two vendors disagree about a bar,
+    that is usually a split or a bad tick, and finding out from a backtest is
+    expensive. US tickers are requested as `<symbol>.us`.
+
+    Stooq serves split-adjusted prices but does not adjust for dividends, so
+    total-return figures on dividend-paying names will read slightly low.
+    """
+
+    BASE_URL = "https://stooq.com/q/d/l/"
+
+    def __init__(self, timeout: float = 20.0, suffix: str = ".us"):
+        self.timeout = timeout
+        self.suffix = suffix
+
+    def _ticker(self, symbol: str) -> str:
+        sym = symbol.lower()
+        # Already qualified (e.g. "spy.us", "^spx") — leave it alone.
+        return sym if ("." in sym or sym.startswith("^")) else sym + self.suffix
+
+    def history(self, symbol: str, start: str, end: str | None = None,
+                interval: str = "1d") -> pd.DataFrame:
+        import io
+
+        import requests
+
+        if interval != "1d":
+            raise ValueError("StooqProvider serves daily bars only")
+
+        response = requests.get(
+            self.BASE_URL, params={"s": self._ticker(symbol), "i": "d"},
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
+        text = response.text
+
+        # Stooq answers an unknown ticker with a 200 and a one-line body
+        # rather than an error status, so check the payload, not the code.
+        if "Date" not in text.split("\n", 1)[0]:
+            raise ValueError(f"{symbol}: stooq returned no data ({text[:60]!r})")
+
+        raw = pd.read_csv(io.StringIO(text), index_col=0, parse_dates=True)
+        df = _normalize(raw, symbol)
+        return df.loc[str(start):str(end)] if end else df.loc[str(start):]
+
+
 class CachedProvider(MarketDataProvider):
     """Wraps a provider with an on-disk parquet cache.
 
@@ -115,11 +177,29 @@ class CachedProvider(MarketDataProvider):
         self.inner = inner
         self.cache_dir = cache_dir
         self.max_age_hours = max_age_hours
+        # Parquet is typed, compact, and fast, but it needs pyarrow. Rather
+        # than make that a hard dependency — or let every write fail silently
+        # and refetch forever, which is what happens if this is not checked —
+        # fall back to CSV when it is unavailable.
+        self.format = "parquet" if _parquet_available() else "csv"
+        if self.format == "csv":
+            log.info("pyarrow not installed; caching bars as CSV")
         os.makedirs(cache_dir, exist_ok=True)
 
     def _path(self, symbol: str, interval: str) -> str:
         safe = symbol.replace("/", "_").replace("^", "_")
-        return os.path.join(self.cache_dir, f"{safe}_{interval}.parquet")
+        return os.path.join(self.cache_dir, f"{safe}_{interval}.{self.format}")
+
+    def _read_cache(self, path: str) -> pd.DataFrame:
+        if self.format == "parquet":
+            return pd.read_parquet(path)
+        return pd.read_csv(path, index_col=0, parse_dates=True)
+
+    def _write_cache(self, df: pd.DataFrame, path: str) -> None:
+        if self.format == "parquet":
+            df.to_parquet(path)
+        else:
+            df.to_csv(path)
 
     def _is_fresh(self, path: str) -> bool:
         if not os.path.exists(path):
@@ -132,7 +212,7 @@ class CachedProvider(MarketDataProvider):
         path = self._path(symbol, interval)
         if self._is_fresh(path):
             try:
-                df = pd.read_parquet(path)
+                df = self._read_cache(path)
                 sliced = df.loc[str(start):str(end)] if end else df.loc[str(start):]
                 if not sliced.empty:
                     return sliced
@@ -142,7 +222,7 @@ class CachedProvider(MarketDataProvider):
         df = self.inner.history(symbol, start, end, interval)
         if not df.empty:
             try:
-                df.to_parquet(path)
+                self._write_cache(df, path)
             except Exception as exc:
                 log.warning("cache write failed for %s: %s", symbol, exc)
         return df
@@ -182,6 +262,8 @@ def make_provider(config) -> MarketDataProvider:
     if name == "csv":
         # Local files are already on disk; a second cache layer buys nothing.
         return CSVProvider(config.csv_dir)
+    if name == "stooq":
+        return CachedProvider(StooqProvider(), config.cache_dir)
     if name not in ("yfinance", "yahoo"):
         log.warning("unknown data provider %r; using yfinance", name)
     return CachedProvider(YFinanceProvider(), config.cache_dir)
