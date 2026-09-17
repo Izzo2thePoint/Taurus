@@ -1,0 +1,33 @@
+# Offline configuration: reads bars from data_csv/<SYMBOL>.csv.
+# Use this behind a restricted network, or to drive the system from a paid
+# vendor's CSV export instead of Yahoo.
+data:
+  provider: csv
+  csv_dir: data_csv
+  universe: [SPY, AAA, BBB, CCC, DDD, EEE, FFF, GGG]
+  benchmark: SPY
+  history_start: "2015-01-02"
+
+model:
+  train_days: 756
+  test_days: 126
+  embargo_days: 10
+  min_oos_accuracy: 0.52
+
+risk:
+  aggression: 2.0
+  target_annual_vol: 0.35
+  max_gross_leverage: 2.0
+  max_position_weight: 0.25
+  max_positions: 6
+  min_signal_confidence: 0.55
+  max_drawdown_halt: 0.20
+  daily_loss_halt: 0.06
+
+execution:
+  broker: paper
+  starting_cash: 100000
+  slippage_bps: 5.0
+
+agent:
+  journal_path: runs/journal.jsonl

@@ -1,0 +1,53 @@
+# Taurus configuration.
+#
+# Simulation is the default. Live trading requires BOTH execution.allow_live
+# below AND the environment variable TAURUS_ALLOW_LIVE=1.
+
+data:
+  universe: [AAPL, MSFT, NVDA, AMZN, META, GOOGL, TSLA, AMD,
+             AVGO, NFLX, CRM, QQQ, SPY, SMH, XLE, XLF]
+  benchmark: SPY
+  history_start: "2015-01-01"
+  interval: 1d
+  cache_dir: data_cache
+
+labels:
+  profit_atr_mult: 2.0      # take-profit barrier, in ATR
+  stop_atr_mult: 1.0        # stop barrier, in ATR -> 2:1 payoff
+  max_holding_days: 10
+
+model:
+  train_days: 756           # ~3 years of training per fold
+  test_days: 63             # trade one quarter, then refit
+  embargo_days: 10          # >= max_holding_days, to stop label leakage
+  min_oos_accuracy: 0.52
+
+risk:
+  # --- the aggressive knobs ---
+  aggression: 2.0
+  target_annual_vol: 0.35
+  max_gross_leverage: 2.0
+  max_position_weight: 0.25
+  max_positions: 8
+  kelly_fraction: 0.5
+  min_signal_confidence: 0.55
+
+  # --- the guardrails: leave these on ---
+  max_drawdown_halt: 0.20
+  daily_loss_halt: 0.06
+  per_trade_stop_atr: 2.0
+  trailing_stop_atr: 3.0
+  exit_confidence_buffer: 0.05
+  min_holding_days: 2
+
+execution:
+  broker: paper
+  starting_cash: 100000
+  slippage_bps: 5.0
+  commission_per_share: 0.0
+  allow_live: false
+
+agent:
+  journal_path: runs/journal.jsonl
+  retrain_every_days: 21
+  rebalance_every_days: 1

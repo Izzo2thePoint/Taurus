@@ -1,0 +1,6 @@
+numpy>=1.26
+pandas>=2.1
+scikit-learn>=1.4
+yfinance>=0.2.40
+PyYAML>=6.0
+pytest>=8.0

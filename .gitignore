@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Taurus runtime state — never commit market data, models, or journals
+data_cache/
+models/
+runs/
+*.parquet
+*.joblib
+journal*.jsonl
+
+# Secrets
+.env
+*.key
+config.local.yaml
+
+# Offline demo data
+data_csv/
