@@ -100,7 +100,8 @@ def cmd_research(args) -> int:
     _, panel = _load_data(config, args.end)
 
     print("\nWalk-forward validation (purged, embargoed):")
-    result = run_walk_forward(panel, config.model)
+    result = run_walk_forward(panel, config.model,
+                              label_horizon=config.labels.max_holding_days)
     print(result.summary().to_string(index=False))
     baseline = sum(f.metrics.baseline_accuracy for f in result.folds) / len(result.folds)
     print(f"\n  mean OOS accuracy {result.mean_accuracy:.4f}"
@@ -119,7 +120,8 @@ def cmd_research(args) -> int:
         print("  The agent will trade rules only. Do not fix this by lowering "
               "the gate —\n  change the features or the labels.")
 
-    model, metrics = train_production_model(panel, config.model)
+    model, metrics = train_production_model(
+        panel, config.model, label_horizon=config.labels.max_holding_days)
     path = model.save(config.model.model_dir)
     print(f"\n  Production model saved to {path}")
     print(f"  Holdout accuracy {metrics.accuracy:.4f} "
@@ -154,7 +156,8 @@ def cmd_backtest(args) -> int:
         # The honest way to evaluate a learned signal: every probability comes
         # from a model that had not seen the bar it is predicting.
         print("\nRunning walk-forward to generate out-of-sample signals...")
-        wf = run_walk_forward(panel, config.model)
+        wf = run_walk_forward(panel, config.model,
+                              label_horizon=config.labels.max_holding_days)
         print(f"  {len(wf.folds)} folds, mean OOS accuracy {wf.mean_accuracy:.4f}, "
               f"mean AUC {wf.mean_auc:.4f}")
         alpha = WalkForwardAlphaStrategy(wf.predictions, config.risk)

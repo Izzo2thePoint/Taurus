@@ -21,6 +21,10 @@ class RiskState:
     """Running risk telemetry for the current session."""
     peak_equity: float = 0.0
     day_start_equity: float = 0.0
+    # Equity at the most recent check. When the date advances this becomes the
+    # new day's baseline — the close of the previous session, which is what
+    # "loss since the open" is measured against.
+    last_equity: float = 0.0
     current_date: date | None = None
     halted: bool = False
     halt_reason: str = ""
@@ -54,6 +58,7 @@ class RiskManager:
         self.state = RiskState(
             peak_equity=starting_equity,
             day_start_equity=starting_equity,
+            last_equity=starting_equity,
             current_date=when,
         )
 
@@ -72,12 +77,17 @@ class RiskManager:
     def on_new_day(self, when: date, equity: float) -> None:
         """Roll the daily loss baseline. Does not clear a drawdown halt.
 
+        The new baseline is the PREVIOUS session's closing equity, not the
+        equity being checked right now. Using the current value silently
+        zeroes the day's loss before it can ever be measured, which disables
+        the limit entirely from the second day onward.
+
         A daily-loss halt expires overnight — it exists to stop a bad day
         compounding. A max-drawdown halt does not: that one says the strategy
         itself is broken and wants a human to look at it.
         """
         self.state.current_date = when
-        self.state.day_start_equity = equity
+        self.state.day_start_equity = self.state.last_equity or equity
         if self.state.halted and self.state.halt_reason.startswith("daily_loss"):
             log.info("daily loss halt cleared for new session %s", when)
             self.state.halted = False
@@ -97,6 +107,7 @@ class RiskManager:
                 self.on_new_day(when, equity)
 
         st.peak_equity = max(st.peak_equity, equity)
+        st.last_equity = equity
 
         if st.halted:
             return RiskDecision(allowed=False, halt=True, reason=st.halt_reason)

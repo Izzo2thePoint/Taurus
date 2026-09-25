@@ -60,7 +60,7 @@ class WalkForwardAlphaStrategy(Strategy):
         signals: list[Signal] = []
 
         for symbol, proba in todays.items():
-            if proba < self.risk.min_signal_confidence:
+            if proba < self._emit_floor:
                 continue
             if symbol not in feats.index:
                 continue

@@ -55,9 +55,9 @@ class MLAlphaStrategy(Strategy):
             if not np.isfinite(vol) or vol <= 0:
                 vol = atr_pct * np.sqrt(252) if np.isfinite(atr_pct) else 0.30
 
-            if p >= self.risk.min_signal_confidence:
+            if p >= self._emit_floor:
                 direction, conf = 1, float(p)
-            elif self.allow_shorts and (1.0 - p) >= self.risk.min_signal_confidence:
+            elif self.allow_shorts and (1.0 - p) >= self._emit_floor:
                 direction, conf = -1, float(1.0 - p)
             else:
                 continue

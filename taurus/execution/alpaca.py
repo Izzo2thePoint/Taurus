@@ -31,6 +31,16 @@ class LiveTradingBlocked(RuntimeError):
     """Raised when live trading is attempted without both safety switches."""
 
 
+class BrokerUnavailable(RuntimeError):
+    """The broker could not be reached or could not report account state.
+
+    Raised rather than returning a placeholder number. An equity of 0.0 looks
+    to the risk manager like a 100% drawdown, which latches a permanent halt
+    and market-sells the entire live book over what may be a momentary
+    network blip.
+    """
+
+
 class AlpacaBroker(Broker):
     """Routes orders to Alpaca. Requires `alpaca-py` (not a core dependency)."""
 
@@ -121,14 +131,17 @@ class AlpacaBroker(Broker):
                             positions=self.positions())
 
     def mark_to_market(self, prices: dict[str, float]) -> float:
-        # The broker is the source of truth for a live account; local marks
-        # are only a fallback if the API call fails.
+        """Current account equity, straight from the broker.
+
+        Never substitutes a placeholder on failure: not knowing our equity and
+        believing it is zero are very different states, and only one of them
+        liquidates the book.
+        """
         self._prices.update(prices or {})
         try:
             return float(self._client.get_account().equity)
         except Exception as exc:
-            log.error("equity lookup failed: %s", exc)
-            return 0.0
+            raise BrokerUnavailable(f"equity lookup failed: {exc}") from exc
 
 
 def make_broker(config: Config) -> Broker:

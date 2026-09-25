@@ -69,10 +69,19 @@ class WalkForwardResult:
 
 
 def run_walk_forward(panel: pd.DataFrame, model_config: ModelConfig,
-                     embargo_days: int | None = None) -> WalkForwardResult:
-    """Roll a train/test window through the panel and collect OOS predictions."""
+                     embargo_days: int | None = None,
+                     label_horizon: int | None = None) -> WalkForwardResult:
+    """Roll a train/test window through the panel and collect OOS predictions.
+
+    `label_horizon` is how many bars a label takes to resolve — normally
+    `LabelConfig.max_holding_days`. It drives the purge, because that is the
+    span over which a training bar's label can contain test-period data.
+    Deriving the purge from `embargo_days` instead quietly leaks resolved
+    labels whenever the label horizon is the longer of the two.
+    """
     cfg = model_config
     embargo = embargo_days if embargo_days is not None else cfg.embargo_days
+    horizon = label_horizon if label_horizon is not None else cfg.embargo_days
 
     rows = training_rows(panel)
     if rows.empty:
@@ -98,7 +107,8 @@ def run_walk_forward(panel: pd.DataFrame, model_config: ModelConfig,
 
         # Purge: drop training bars whose labels resolve after the train
         # window ends and therefore peek into the test period.
-        purge_cutoff = train_hi - pd.Timedelta(days=int(cfg.embargo_days * 1.5))
+        # Calendar days, generously, to cover the trading days in the horizon.
+        purge_cutoff = train_hi - pd.Timedelta(days=int(horizon * 1.5))
         train_mask = (dates >= train_lo) & (dates <= purge_cutoff)
         test_mask = (dates >= test_lo) & (dates <= test_hi)
 
@@ -142,7 +152,8 @@ def run_walk_forward(panel: pd.DataFrame, model_config: ModelConfig,
     return WalkForwardResult(folds=folds, predictions=predictions)
 
 
-def train_production_model(panel: pd.DataFrame, model_config: ModelConfig
+def train_production_model(panel: pd.DataFrame, model_config: ModelConfig,
+                           label_horizon: int | None = None
                            ) -> tuple[AlphaModel, ModelMetrics]:
     """Fit the model that will actually trade.
 
@@ -163,8 +174,10 @@ def train_production_model(panel: pd.DataFrame, model_config: ModelConfig
         metrics.tradeable = False
         return model, metrics
 
+    horizon = (label_horizon if label_horizon is not None
+               else model_config.embargo_days)
     holdout_start = unique_dates[-model_config.test_days]
-    purge_cutoff = holdout_start - pd.Timedelta(days=int(model_config.embargo_days * 1.5))
+    purge_cutoff = holdout_start - pd.Timedelta(days=int(horizon * 1.5))
     train_mask = dates <= purge_cutoff
     test_mask = dates >= holdout_start
 

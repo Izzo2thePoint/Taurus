@@ -53,6 +53,23 @@ class Strategy(ABC):
 
     name: str = "strategy"
 
+    @property
+    def _emit_floor(self) -> float:
+        """Lowest confidence worth emitting a signal at.
+
+        Strategies must NOT filter at `min_signal_confidence`: the allocator
+        applies that threshold itself, and lowers it by
+        `exit_confidence_buffer` for positions already held. A strategy that
+        pre-filters at the entry threshold makes that hysteresis unreachable —
+        the marginal incumbent signal never reaches the allocator, so the
+        position is churned out on exactly the noise the buffer exists to
+        absorb.
+        """
+        risk = getattr(self, "risk", None)
+        if risk is None:
+            return 0.0
+        return max(0.0, risk.min_signal_confidence - risk.exit_confidence_buffer)
+
     @abstractmethod
     def generate(self, snapshot: MarketSnapshot) -> list[Signal]:
         """Return signals for the given bar. May return an empty list."""

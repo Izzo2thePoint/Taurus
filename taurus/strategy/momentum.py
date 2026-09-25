@@ -68,7 +68,7 @@ class MomentumBreakoutStrategy(Strategy):
             score += min(0.05, max(0.0, vol_ratio - 1.0) * 0.05)
             confidence = float(np.clip(score, 0.0, 0.95))
 
-            if confidence < self.risk.min_signal_confidence:
+            if confidence < self._emit_floor:
                 continue
 
             signals.append(Signal(

@@ -28,7 +28,11 @@ class FeatureBuilder:
         # --- Trend / momentum: does this thing keep going? -------------------
         for w in cfg.momentum_windows:
             f[f"mom_{w}"] = ind.momentum(c, w)
-        f["mom_21_ex_5"] = f.get("mom_21", 0) - f.get("mom_5", 0)  # medium-term, minus the most recent week
+        # Medium-term momentum with the most recent week removed. Computed
+        # from prices rather than from other feature columns, which silently
+        # became a constant 0 whenever `momentum_windows` did not contain
+        # both 21 and 5.
+        f["mom_21_ex_5"] = ind.momentum(c, 21) - ind.momentum(c, 5)
         f["sma_ratio_20_50"] = ind.sma(c, 20) / ind.sma(c, 50) - 1.0
         f["sma_ratio_50_200"] = ind.sma(c, 50) / ind.sma(c, 200) - 1.0
         f["price_vs_sma20"] = c / ind.sma(c, 20) - 1.0
@@ -51,8 +55,13 @@ class FeatureBuilder:
         f["atr_pct"] = atr_abs / c
         for w in cfg.vol_windows:
             f[f"vol_{w}"] = ind.realized_vol(c, w)
-        # Vol-of-vol regime: is volatility itself expanding?
-        f["vol_ratio_10_63"] = f["vol_10"] / f["vol_63"].replace(0.0, pd.NA)
+        # Vol-of-vol regime: is volatility itself expanding? Uses the
+        # shortest and longest configured windows rather than hardcoded ones,
+        # which raised KeyError the moment `vol_windows` was changed.
+        if len(cfg.vol_windows) >= 2:
+            short, long = min(cfg.vol_windows), max(cfg.vol_windows)
+            f[f"vol_ratio_{short}_{long}"] = (
+                f[f"vol_{short}"] / f[f"vol_{long}"].replace(0.0, pd.NA))
 
         # --- Participation ---------------------------------------------------
         f["volume_ratio"] = ind.volume_ratio(v, 21)
@@ -81,5 +90,6 @@ class FeatureBuilder:
     @staticmethod
     def feature_columns(frame: pd.DataFrame) -> list[str]:
         """Model input columns: everything that is not a label or bookkeeping."""
-        reserved = {"label", "label_return", "holding_days", "symbol", "atr_abs"}
+        reserved = {"label", "label_return", "holding_days", "target",
+                    "symbol", "atr_abs", "close"}
         return [c for c in frame.columns if c not in reserved]

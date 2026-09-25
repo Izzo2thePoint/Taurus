@@ -23,11 +23,21 @@ from ..execution.broker import Order, OrderSide
 from ..execution.paper import PaperBroker
 from ..risk.limits import RiskManager
 from ..risk.allocator import orders_to_reach, target_weights
-from ..risk.sizing import trailing_stop_price
+from ..risk.sizing import stop_price, trailing_stop_price
 from ..strategy.base import MarketSnapshot, Strategy
 from .metrics import PerformanceReport, build_report
 
 log = logging.getLogger(__name__)
+
+# Columns derived from bars AFTER the current one. They belong to training,
+# never to a snapshot: handing them to a strategy would make the documented
+# no-lookahead guarantee depend on strategies choosing not to read them.
+FORWARD_LOOKING_COLUMNS = ("label", "label_return", "holding_days", "target")
+
+
+def _drop_forward_looking(rows: pd.DataFrame) -> pd.DataFrame:
+    present = [c for c in FORWARD_LOOKING_COLUMNS if c in rows.columns]
+    return rows.drop(columns=present) if present else rows
 
 
 @dataclass
@@ -124,7 +134,8 @@ class BacktestEngine:
 
             # --- 2. Intraday stop checks against today's actual range.
             broker.set_prices({**closes}, when=today.to_pydatetime())
-            stop_fills = self._check_stops(broker, highs, lows, closes, today)
+            stop_fills = self._check_stops(broker, highs, lows, closes,
+                                           self._atrs_at(panel, today), today)
             for fill in stop_fills:
                 self._record_trade(trades, open_trades, fill, today)
 
@@ -207,6 +218,7 @@ class BacktestEngine:
             return None
         if todays_rows.empty:
             return None
+        todays_rows = _drop_forward_looking(todays_rows)
         return MarketSnapshot(
             as_of=today.date(),
             features=todays_rows,
@@ -230,8 +242,19 @@ class BacktestEngine:
 
     def _check_stops(self, broker: PaperBroker, highs: dict[str, float],
                      lows: dict[str, float], closes: dict[str, float],
-                     today: pd.Timestamp):
-        """Exit positions whose stop was touched during the bar."""
+                     atrs: dict[str, float], today: pd.Timestamp):
+        """Exit positions whose initial or trailing stop was touched.
+
+        Both stops are evaluated. The initial stop is measured from the entry
+        price and protects a position that never worked; the trailing stop is
+        measured from the best price since entry and protects a winner giving
+        back its gains. Whichever is tighter governs.
+
+        Stop distances use the symbol's real ATR. An earlier version used a
+        flat 2% of entry price for everything, which set a far-too-wide stop on
+        a quiet ETF and a far-too-tight one on a volatile single name — while
+        making the configured `per_trade_stop_atr` dead code.
+        """
         fills = []
         for symbol, pos in list(broker.positions().items()):
             if pos.quantity == 0:
@@ -239,28 +262,52 @@ class BacktestEngine:
             close = closes.get(symbol)
             if close is None:
                 continue
-            atr_est = pos.avg_price * 0.02  # fallback when no live ATR is at hand
-            trail = trailing_stop_price(pos.peak_price or pos.avg_price, atr_est,
-                                        self.config.risk, 1 if pos.quantity > 0 else -1)
-            low, high = lows.get(symbol, close), highs.get(symbol, close)
 
-            hit = (pos.quantity > 0 and low <= trail) or (pos.quantity < 0 and high >= trail)
+            atr = atrs.get(symbol)
+            if not atr or not np.isfinite(atr) or atr <= 0:
+                # No ATR for this bar (indicator warm-up); skip rather than
+                # invent a stop distance out of thin air.
+                continue
+
+            direction = 1 if pos.quantity > 0 else -1
+            initial = stop_price(pos.avg_price, atr, self.config.risk, direction)
+            trail = trailing_stop_price(pos.peak_price or pos.avg_price, atr,
+                                        self.config.risk, direction)
+            # The tighter of the two is the live stop.
+            level = max(initial, trail) if direction > 0 else min(initial, trail)
+            reason = ("initial_stop" if level == initial and initial != trail
+                      else "trailing_stop")
+
+            low, high = lows.get(symbol, close), highs.get(symbol, close)
+            hit = (direction > 0 and low <= level) or (direction < 0 and high >= level)
             if not hit:
                 continue
 
-            # Fill at the stop, or at the open-equivalent worst case if the bar
-            # gapped straight through it. Assuming the stop price on a gap is
-            # how backtests understate tail losses.
-            exit_price = trail if (low <= trail <= high) else close
+            # Fill at the stop, or at the close if the bar gapped straight
+            # through it. Assuming the stop price on a gap is how backtests
+            # understate tail losses.
+            exit_price = level if (low <= level <= high) else close
             broker.set_prices({symbol: exit_price}, when=today.to_pydatetime())
             fill = broker.submit(Order(
                 symbol=symbol, quantity=abs(pos.quantity),
                 side=OrderSide.SELL if pos.quantity > 0 else OrderSide.BUY,
-                reason="trailing_stop"))
+                reason=reason))
             if fill:
                 fills.append(fill)
             broker.set_prices({symbol: close}, when=today.to_pydatetime())
         return fills
+
+    @staticmethod
+    def _atrs_at(panel: pd.DataFrame, when: pd.Timestamp) -> dict[str, float]:
+        """Per-symbol ATR in price terms for this bar, straight from the panel."""
+        try:
+            rows = panel.xs(when, level="date")
+        except KeyError:
+            return {}
+        if "atr_abs" not in rows.columns:
+            return {}
+        series = rows["atr_abs"].dropna()
+        return {str(sym): float(v) for sym, v in series.items() if v > 0}
 
     def _within_min_hold(self, pos, today: pd.Timestamp | None) -> bool:
         """True if the position is younger than `min_holding_days`.
@@ -352,9 +399,15 @@ class BacktestEngine:
         are liquidated outside the normal fill path.
         """
         record = open_trades.get(symbol)
-        if record is None or price <= 0:
-            open_trades.pop(symbol, None)
+        if record is None:
             return
+        if price <= 0:
+            # No mark on the halt or final day. Value the remainder at its own
+            # entry price (a zero return on the open portion) rather than
+            # dropping the record, which silently removed losing trades from
+            # the win rate and profit factor.
+            price = record.entry_price
+            reason = f"{reason}_unpriced"
         direction = 1 if record.quantity > 0 else -1
         record.realized_pnl += direction * abs(record.quantity) * (price - record.entry_price)
         BacktestEngine._finalize(trades, open_trades, symbol, today, price, reason)

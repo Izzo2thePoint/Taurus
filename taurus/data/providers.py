@@ -207,16 +207,35 @@ class CachedProvider(MarketDataProvider):
         if self._is_fresh(path):
             try:
                 df = self._read_cache(path)
-                sliced = df.loc[str(start):str(end)] if end else df.loc[str(start):]
-                if not sliced.empty:
-                    return sliced
+                # The cache is keyed on symbol and interval only, so a cached
+                # 2022+ fetch must not be served for a 2015+ request. Check
+                # that the cached history actually reaches back far enough,
+                # otherwise a wider request silently gets the narrow answer.
+                if not df.empty and df.index.min() <= pd.Timestamp(start):
+                    sliced = df.loc[str(start):str(end)] if end else df.loc[str(start):]
+                    if not sliced.empty:
+                        return sliced
+                elif not df.empty:
+                    log.info("cache for %s starts %s, need %s; refetching",
+                             symbol, df.index.min().date(), start)
             except Exception as exc:  # corrupt cache should never be fatal
                 log.warning("cache read failed for %s (%s); refetching", symbol, exc)
 
         df = self.inner.history(symbol, start, end, interval)
         if not df.empty:
+            merged = df
+            # Union with whatever was cached, so requesting 2022+ then 2015+
+            # then 2022+ again does not refetch every time.
+            if os.path.exists(path):
+                try:
+                    previous = self._read_cache(path)
+                    if not previous.empty:
+                        merged = pd.concat([previous, df])
+                        merged = merged[~merged.index.duplicated(keep="last")].sort_index()
+                except Exception:
+                    merged = df
             try:
-                self._write_cache(df, path)
+                self._write_cache(merged, path)
             except Exception as exc:
                 log.warning("cache write failed for %s: %s", symbol, exc)
         return df

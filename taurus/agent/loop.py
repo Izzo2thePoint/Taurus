@@ -17,8 +17,10 @@ from datetime import date
 
 import pandas as pd
 
+from ..backtest.engine import _drop_forward_looking
 from ..config import Config
 from ..data.providers import MarketDataProvider, load_universe, make_provider
+from ..execution.alpaca import BrokerUnavailable
 from ..execution.broker import Broker, Order
 from ..research.dataset import build_panel
 from ..research.model import AlphaModel
@@ -112,7 +114,9 @@ class TradingAgent:
 
         when = when or date.today()
         try:
-            candidate, metrics = train_production_model(self._panel, self.config.model)
+            candidate, metrics = train_production_model(
+                self._panel, self.config.model,
+                label_horizon=self.config.labels.max_holding_days)
         except Exception as exc:
             log.error("training failed: %s", exc)
             self.journal.log_research(when, {"error": str(exc)})
@@ -153,8 +157,16 @@ class TradingAgent:
 
         as_of = as_of or date.today()
         latest = self._latest_snapshot(as_of)
-        equity = self.broker.mark_to_market(latest.prices) if latest else \
-            self.broker.account().equity
+        try:
+            equity = (self.broker.mark_to_market(latest.prices) if latest
+                      else self.broker.account().equity)
+        except BrokerUnavailable as exc:
+            # Do not run the risk check on a number we do not have. Skipping a
+            # cycle is recoverable; acting on a fabricated equity is not.
+            log.error("broker unavailable, skipping cycle: %s", exc)
+            self.journal.log_risk(as_of, "broker_unavailable", str(exc))
+            return CycleResult(as_of, 0.0, 0, 0, 0, halted=False,
+                               halt_reason="broker unavailable")
 
         account = self.broker.account()
         self.journal.log_equity(
@@ -177,7 +189,7 @@ class TradingAgent:
 
         signals = self.strategy.generate(latest)
         orders = self._orders_from_signals(signals, latest.prices, equity,
-                                           decision.scale)
+                                           decision.scale, as_of)
 
         n_fills = 0
         for order in orders:
@@ -219,6 +231,7 @@ class TradingAgent:
         rows = self._panel.xs(latest, level="date")
         prices = {s: float(rows.at[s, "close"]) for s in rows.index
                   if "close" in rows.columns and pd.notna(rows.at[s, "close"])}
+        rows = _drop_forward_looking(rows)
         return MarketSnapshot(
             as_of=latest.date(), features=rows,
             bars={s: b.loc[:latest] for s, b in self._bars.items()},
@@ -226,12 +239,27 @@ class TradingAgent:
         )
 
     def _orders_from_signals(self, signals, prices: dict[str, float],
-                             equity: float, risk_scale: float) -> list[Order]:
+                             equity: float, risk_scale: float,
+                             as_of: date | None = None) -> list[Order]:
         """Same allocator the backtester uses — deliberately not a second copy."""
         current = self.broker.positions()
         incumbents = {s for s, p in current.items() if p.quantity != 0}
         targets = target_weights(signals, self.config, incumbents, risk_scale)
-        return orders_to_reach(targets, current, prices, equity)
+        # The backtest honours min_holding_days; live must too, or the two
+        # diverge on exactly the behaviour the shared allocator exists to keep
+        # identical. Stops and the risk halt still bypass it.
+        protected = [s for s, p in current.items()
+                     if self._within_min_hold(p, as_of)]
+        return orders_to_reach(targets, current, prices, equity,
+                               skip_exit=protected)
+
+    def _within_min_hold(self, pos, as_of: date | None) -> bool:
+        """True if the position is younger than `min_holding_days`."""
+        min_days = self.config.risk.min_holding_days
+        if min_days <= 0 or as_of is None or pos.opened_at is None:
+            return False
+        opened = pos.opened_at.date() if hasattr(pos.opened_at, "date") else pos.opened_at
+        return (as_of - opened).days < min_days
 
     @staticmethod
     def _confidence_for(signals, symbol: str) -> float:
