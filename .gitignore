@@ -21,3 +21,8 @@ config.local.yaml
 
 # Offline demo data
 data_csv/
+
+# Model artifacts are pickle-based executable code; never commit them.
+models/
+*.joblib
+*.joblib.sha256

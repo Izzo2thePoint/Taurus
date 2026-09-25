@@ -21,7 +21,7 @@ from .data.providers import load_universe, make_provider
 from .execution.alpaca import make_broker
 from .execution.paper import PaperBroker
 from .research.dataset import build_panel
-from .research.model import AlphaModel
+from .research.model import AlphaModel, ModelIntegrityError
 from .research.walkforward import run_walk_forward, train_production_model
 from .strategy.ensemble import EnsembleStrategy
 from .strategy.ml_alpha import MLAlphaStrategy
@@ -60,6 +60,11 @@ def _load_gated_model(config: Config, force: bool = False) -> AlphaModel | None:
         model = AlphaModel.load(config.model.model_dir)
     except FileNotFoundError:
         log.warning("no saved model found; run `research` first. Using rules only.")
+        return None
+    except ModelIntegrityError as exc:
+        # Never fall back to loading it anyway: a model file is executable code.
+        log.error("refusing to load the saved model: %s", exc)
+        log.error("trading rules only. Retrain with `taurus research`.")
         return None
 
     metrics = model.metrics

@@ -171,6 +171,19 @@ When a model is rejected the agent trades the rules-based strategy alone.
 **Do not respond to a rejection by lowering the gate.** Change the features
 or the labels.
 
+## A saved model is executable code
+
+Model files are serialized with joblib, which uses pickle — loading one runs
+whatever code it contains, in the process that holds your broker credentials
+and can place orders. `save` therefore writes a SHA-256 companion file, and
+`load` refuses a model whose digest is missing or does not match, so tampering
+with a model this installation produced is caught.
+
+That does not make a model from a stranger safe: a hostile file ships its own
+digest. **Treat a `.joblib` as you would a shell script — only load one from a
+source you would run code from.** If in doubt, delete it and retrain:
+`taurus research` takes minutes.
+
 ## Going live
 
 Live trading needs **both**:
@@ -208,7 +221,7 @@ taurus/
   backtest/              event-driven engine, performance metrics
   agent/                 the trading loop and the decision journal
   cli.py                 research | backtest | signals | trade | validate
-tests/                   109 tests
+tests/                   132 tests
 ```
 
 The backtester and the live agent share one allocator (`risk/allocator.py`)
@@ -219,7 +232,7 @@ live behavior is worse than none, because it is trusted.
 ## Tests
 
 ```bash
-python -m pytest tests/ -q      # 109 passed
+python -m pytest tests/ -q      # 132 passed
 ```
 
 ---

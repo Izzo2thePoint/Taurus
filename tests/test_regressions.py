@@ -7,7 +7,6 @@ nothing.
 import datetime as dt
 from unittest.mock import Mock, patch
 
-import numpy as np
 import pandas as pd
 import pytest
 
@@ -315,3 +314,52 @@ def test_unpriced_close_keeps_the_trade_record():
     assert trades[0].return_pct is not None
     assert trades[0].exit_reason.endswith("_unpriced")
     assert not open_trades
+
+
+# --- Security: model files are executable code ---------------------------
+
+def test_tampered_model_is_refused(tmp_path):
+    """joblib unpickles, which runs arbitrary code in the process holding the
+    broker credentials. A modified file must not load."""
+    from taurus.research.model import AlphaModel, ModelIntegrityError
+
+    model = AlphaModel(ModelConfig())
+    model.features = ["mom_21"]
+    model.save(str(tmp_path))
+
+    path = tmp_path / "alpha.joblib"
+    path.write_bytes(path.read_bytes() + b"\x00tampered")
+
+    with pytest.raises(ModelIntegrityError, match="digest"):
+        AlphaModel.load(str(tmp_path))
+
+
+def test_model_without_a_digest_is_refused(tmp_path):
+    from taurus.research.model import AlphaModel, ModelIntegrityError
+
+    model = AlphaModel(ModelConfig())
+    model.features = ["mom_21"]
+    model.save(str(tmp_path))
+    (tmp_path / "alpha.joblib.sha256").unlink()
+
+    with pytest.raises(ModelIntegrityError, match="verified"):
+        AlphaModel.load(str(tmp_path))
+
+
+def test_untampered_model_loads(tmp_path):
+    from taurus.research.model import AlphaModel
+
+    model = AlphaModel(ModelConfig())
+    model.features = ["mom_21"]
+    model.save(str(tmp_path))
+    assert AlphaModel.load(str(tmp_path)).features == ["mom_21"]
+
+
+def test_trust_unverified_is_an_explicit_opt_in(tmp_path):
+    from taurus.research.model import AlphaModel
+
+    model = AlphaModel(ModelConfig())
+    model.features = ["mom_21"]
+    model.save(str(tmp_path))
+    (tmp_path / "alpha.joblib.sha256").unlink()
+    assert AlphaModel.load(str(tmp_path), trust_unverified=True) is not None

@@ -7,6 +7,7 @@ useless for sizing.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -22,6 +23,44 @@ from sklearn.metrics import accuracy_score, brier_score_loss, roc_auc_score
 from ..config import ModelConfig
 
 log = logging.getLogger(__name__)
+
+
+class ModelIntegrityError(RuntimeError):
+    """A model file is missing its digest, or does not match it.
+
+    Loading is refused rather than attempted: deserializing the file runs
+    whatever code it contains, inside the process that holds the broker
+    credentials.
+    """
+
+
+def _digest(path: str) -> str:
+    """SHA-256 of a file, read in chunks so a large model does not load twice."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _verify_digest(path: str) -> None:
+    sidecar = f"{path}.sha256"
+    if not os.path.exists(sidecar):
+        raise ModelIntegrityError(
+            f"{path} has no .sha256 companion, so it cannot be verified. "
+            "Loading it would execute whatever code it contains. Retrain with "
+            "`taurus research` to regenerate it, or pass trust_unverified=True "
+            "if you produced this file yourself and understand the risk."
+        )
+    with open(sidecar) as fh:
+        expected = fh.read().strip()
+    actual = _digest(path)
+    if actual != expected:
+        raise ModelIntegrityError(
+            f"{path} does not match its recorded digest -- it has been "
+            f"modified or replaced since it was saved. Refusing to load. "
+            f"Expected {expected[:16]}..., got {actual[:16]}..."
+        )
 
 
 @dataclass
@@ -158,6 +197,19 @@ class AlphaModel:
         return pd.Series(result.importances_mean, index=self.features).sort_values(ascending=False)
 
     # --- persistence -------------------------------------------------------
+    #
+    # joblib serializes with pickle, and unpickling executes arbitrary code in
+    # the loading process. That process is the one holding live broker
+    # credentials in its environment and able to place orders, so a tampered
+    # or untrusted model file is a full compromise of the trading account, not
+    # just a bad prediction.
+    #
+    # Saving therefore also writes a SHA-256 digest, and loading refuses a file
+    # whose digest is missing or does not match. That detects tampering with a
+    # model this installation produced. It cannot make a model from a stranger
+    # safe -- a hostile file ships its own digest -- so treat a model file
+    # exactly like a script: only load one from a source you would run code
+    # from.
 
     def save(self, directory: str | None = None, name: str = "alpha") -> str:
         import joblib
@@ -167,6 +219,8 @@ class AlphaModel:
         path = os.path.join(directory, f"{name}.joblib")
         joblib.dump({"model": self.model, "features": self.features,
                      "config": asdict(self.config)}, path)
+        with open(f"{path}.sha256", "w") as fh:
+            fh.write(_digest(path))
         if self.metrics:
             with open(os.path.join(directory, f"{name}.metrics.json"), "w") as fh:
                 json.dump(asdict(self.metrics), fh, indent=2)
@@ -174,10 +228,22 @@ class AlphaModel:
         return path
 
     @classmethod
-    def load(cls, directory: str = "models", name: str = "alpha") -> "AlphaModel":
+    def load(cls, directory: str = "models", name: str = "alpha",
+             trust_unverified: bool = False) -> "AlphaModel":
+        """Load a saved model after verifying it has not been altered.
+
+        `trust_unverified` skips the check. Pass it only for a file you
+        produced and understand; it permits arbitrary code execution.
+        """
         import joblib
 
         path = os.path.join(directory, f"{name}.joblib")
+        if not os.path.exists(path):
+            raise FileNotFoundError(path)
+
+        if not trust_unverified:
+            _verify_digest(path)
+
         payload = joblib.load(path)
         obj = cls(ModelConfig(**payload["config"]))
         obj.model = payload["model"]
